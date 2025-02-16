@@ -43,6 +43,12 @@ def setup_logging():
     trading_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     trading_handler.setFormatter(trading_formatter)
 
+    # Strategy file handler (INFO and above)
+    strategy_handler = RotatingFileHandler('logs/strategy.log', maxBytes=1024*1024, backupCount=5)
+    strategy_handler.setLevel(logging.INFO)
+    strategy_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    strategy_handler.setFormatter(strategy_formatter)
+
     # Add handlers to the main logger
     main_logger.addHandler(console_handler)
     main_logger.addHandler(ws_handler)
@@ -53,6 +59,13 @@ def setup_logging():
     ws_logger.setLevel(logging.DEBUG)
     ws_logger.addHandler(ws_handler)
     ws_logger.propagate = False  # Prevent messages from propagating to the root logger
+
+    # Configure Strategy logger
+    strategy_logger = logging.getLogger('strategy')
+    strategy_logger.setLevel(logging.INFO)
+    strategy_logger.addHandler(strategy_handler)
+    strategy_logger.addHandler(console_handler)  # Also show strategy messages in console
+    strategy_logger.propagate = False  # Prevent messages from propagating to the root logger
 
     return main_logger
 
@@ -94,10 +107,15 @@ class TradingBot:
             signal_buffer_seconds=3
         )
         
+        # Set up strategy logger
+        self.strategy_logger = logging.getLogger('strategy')
+        
         # Trading state
         self.is_trading = False
         self.current_position = None
         self.running = True
+        self.last_signal = None
+        self.last_signal_time = None
         
         # Initialize DataFrame for 1-second candlesticks
         self.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trades']
@@ -125,56 +143,54 @@ class TradingBot:
         self.last_update_time = None
 
     def aggregate_tick_data(self, message):
-        """Aggregate WebSocket data into 1-second candlesticks using pandas."""
+        """Aggregate WebSocket data into 1-second candlesticks."""
         try:
             if not isinstance(message, dict):
                 return
                 
-            topic = message.get('topic', '')
-            subject = message.get('subject', '')
             data = message.get('data', {})
-            
-            if not data or 'ts' not in data:
+            if not data:
                 return
                 
-            # Convert nanosecond timestamp to second timestamp
-            current_time = int(float(data.get('ts', 0)) / 1e9)
-            
-            # Extract price and size based on message type
+            # Extract price from different message types
             price = None
-            size = 0
-            
-            if 'tickerV2' in topic and subject == 'tickerV2':
-                bid_price = float(data.get('bestBidPrice', 0))
-                ask_price = float(data.get('bestAskPrice', 0))
+            if 'bestBidPrice' in data and 'bestAskPrice' in data:
+                bid_price = float(data['bestBidPrice'])
+                ask_price = float(data['bestAskPrice'])
                 price = (bid_price + ask_price) / 2
-                size = (float(data.get('bestBidSize', 0)) + float(data.get('bestAskSize', 0))) / 2
+            elif 'price' in data:
+                price = float(data['price'])
+            elif 'markPrice' in data:
+                price = float(data['markPrice'])
                 
-            elif 'execution' in topic and subject == 'match':
-                price = float(data.get('price', 0))
-                size = float(data.get('size', 0))
-                
-            elif 'instrument' in topic and subject == 'instrument':
-                self.mark_price = float(data.get('markPrice', 0))
-                self.index_price = float(data.get('indexPrice', 0))
-                self.funding_rate = float(data.get('fundingRate', 0))
-                price = self.mark_price
-                
-            if price is None or price == 0:
+            if price is None:
                 return
                 
-            # Initialize or update current candle
+            # Update last price
+            self.last_price = price
+            self.last_update_time = int(time.time())
+            
+            # Create new candlestick every second
+            current_time = self.last_update_time
+            
             if self.current_candle['timestamp'] is None:
-                self.current_candle['timestamp'] = current_time
-                self.current_candle['open'] = price
-                self.current_candle['high'] = price
-                self.current_candle['low'] = price
-                self.current_candle['close'] = price
-                self.current_candle['volume'] = size
-                self.current_candle['trades'] = 1
-                
+                # Initialize first candle
+                self.current_candle = {
+                    'timestamp': current_time,
+                    'open': price,
+                    'high': price,
+                    'low': price,
+                    'close': price,
+                    'volume': 0,
+                    'trades': 1
+                }
             elif current_time > self.current_candle['timestamp']:
-                # Store the completed candle in DataFrame
+                # Log the completed candle
+                logger.debug(f"Completed candle - Time: {datetime.fromtimestamp(self.current_candle['timestamp']).strftime('%H:%M:%S')} | "
+                           f"O: {self.current_candle['open']:.3f} | H: {self.current_candle['high']:.3f} | "
+                           f"L: {self.current_candle['low']:.3f} | C: {self.current_candle['close']:.3f}")
+                
+                # Store the completed candle
                 new_row = pd.DataFrame([self.current_candle])
                 self.candlestick_df = pd.concat([self.candlestick_df, new_row], ignore_index=True)
                 
@@ -189,7 +205,7 @@ class TradingBot:
                     'high': price,
                     'low': price,
                     'close': price,
-                    'volume': size,
+                    'volume': 0,
                     'trades': 1
                 }
             else:
@@ -197,14 +213,11 @@ class TradingBot:
                 self.current_candle['high'] = max(self.current_candle['high'], price)
                 self.current_candle['low'] = min(self.current_candle['low'], price)
                 self.current_candle['close'] = price
-                self.current_candle['volume'] += size
                 self.current_candle['trades'] += 1
-            
-            self.last_price = price
-            self.last_update_time = current_time
-            
+                
         except Exception as e:
             logger.error(f"Error aggregating market data: {str(e)}")
+            logger.exception("Full traceback:")
 
     def format_candlesticks_for_display(self, num_candles=None):
         """Format recent candlesticks for display."""
@@ -230,14 +243,34 @@ class TradingBot:
         
         return display_df
 
+    def process_trading_signals(self):
+        """Process trading signals from strategy."""
+        if len(self.candlestick_df) < 100:  # Need enough data for indicators
+            return
+            
+        # Convert DataFrame to list of dictionaries for strategy
+        candles = self.candlestick_df.to_dict('records')
+        
+        # Get trading signal
+        signal = self.strategy.analyze_candles(candles)
+        
+        if signal:
+            current_time = int(time.time())
+            # Only process new signals or signals older than 3 seconds
+            if (self.last_signal != signal or 
+                self.last_signal_time is None or 
+                current_time - self.last_signal_time > 3):
+                
+                self.last_signal = signal
+                self.last_signal_time = current_time
+                
+                # Execute trade
+                self.execute_trade(signal)
+
     def on_candlestick_update(self, message):
         """Handle new market data and display updates."""
         try:
             if isinstance(message, dict):
-                # Log WebSocket message to separate file
-                ws_logger = logging.getLogger('websocket')
-                ws_logger.debug(f"WebSocket message: {message}")
-                
                 # Aggregate the data
                 self.aggregate_tick_data(message)
                 
@@ -246,47 +279,68 @@ class TradingBot:
                 if current_second > self.last_display_time:
                     self.last_display_time = current_second
                     
-                    # Display market data
+                    # Only update display if we have price data
                     if self.last_price and self.last_update_time:
-                        current_time = datetime.fromtimestamp(self.last_update_time).strftime('%H:%M:%S')
-                        
-                        # Clear screen and move cursor to top
+                        # Clear screen
                         os.system('cls' if os.name == 'nt' else 'clear')
                         
                         # Display header
-                        print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}")  # Widened separator
+                        print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
                         print(f"{Fore.GREEN}KuCoin Futures Bot - {self.symbol}{Style.RESET_ALL}")
-                        print(f"Time: {current_time}")
-                        print(f"Storing last {self.max_stored_candles} candles, displaying last {self.display_candles}")
-                        print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}\n")  # Widened separator
+                        print(f"Time: {datetime.fromtimestamp(self.last_update_time).strftime('%H:%M:%S')}")
+                        print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
                         
-                        # Display current market state in organized sections
-                        print(f"{Fore.BLUE}Current Market State:{Style.RESET_ALL}")
+                        # Display basic market data
+                        print(f"{Fore.BLUE}Market Data:{Style.RESET_ALL}")
                         print(f"{'-'*30}")
                         print(f"Current Price: {Fore.YELLOW}{self.last_price:.3f}{Style.RESET_ALL} USDT")
-                        if self.mark_price:
-                            print(f"Mark Price:    {Fore.YELLOW}{self.mark_price:.3f}{Style.RESET_ALL} USDT")
-                        if self.index_price:
-                            print(f"Index Price:   {Fore.YELLOW}{self.index_price:.3f}{Style.RESET_ALL} USDT")
-                        if self.funding_rate:
-                            print(f"Funding Rate:  {Fore.YELLOW}{self.funding_rate*100:.4f}%{Style.RESET_ALL}")
+                        print(f"Candlesticks:  {len(self.candlestick_df)}/100")
+                        print()
                         
-                        # Display recent candlesticks with more historical data
-                        recent_candles = self.format_candlesticks_for_display()
-                        if recent_candles is not None:
-                            print(f"\n{Fore.BLUE}Recent Candlesticks (Last {self.display_candles} seconds):{Style.RESET_ALL}")
-                            print(f"{'-'*80}")  # Widened separator
-                            print(f"{'Time':^8} | {'Open':^8} | {'High':^8} | {'Low':^8} | {'Close':^8} | {'Volume':^10} | {'Trades':^6}")
-                            print(f"{'-'*80}")  # Widened separator
-                            
-                            for _, row in recent_candles.iterrows():
-                                print(f"{row['time']:^8} | {row['open']:8.3f} | {row['high']:8.3f} | "
-                                      f"{row['low']:8.3f} | {row['close']:8.3f} | {row['volume']:10.4f} | {row['trades']:^6d}")
-                            
-                            print(f"{'-'*80}\n")  # Widened separator
-                    
+                        # Display indicators if we have enough data
+                        if len(self.candlestick_df) >= 100:
+                            try:
+                                # Calculate indicators
+                                rsi = self.strategy.calculate_rsi(self.candlestick_df['close'].values)
+                                macd, signal, hist = self.strategy.calculate_macd(self.candlestick_df['close'].values)
+                                
+                                print(f"{Fore.BLUE}Indicators:{Style.RESET_ALL}")
+                                print(f"{'-'*30}")
+                                
+                                # Display RSI with color
+                                rsi_color = (Fore.GREEN if rsi <= 40 else 
+                                           Fore.RED if rsi >= 60 else 
+                                           Fore.YELLOW)
+                                print(f"RSI (40/60):    {rsi_color}{rsi:.2f}{Style.RESET_ALL}")
+                                
+                                # Display MACD with color
+                                macd_color = Fore.GREEN if macd > signal else Fore.RED
+                                print(f"MACD Line:      {macd_color}{macd:.4f}{Style.RESET_ALL}")
+                                print(f"Signal Line:    {macd_color}{signal:.4f}{Style.RESET_ALL}")
+                                print(f"Histogram:      {Fore.GREEN if hist > 0 else Fore.RED}{hist:.4f}{Style.RESET_ALL}")
+                                print()
+                                
+                            except Exception as e:
+                                print(f"{Fore.RED}Error calculating indicators: {str(e)}{Style.RESET_ALL}")
+                        else:
+                            print(f"{Fore.YELLOW}Waiting for more data to calculate indicators...{Style.RESET_ALL}")
+                            print(f"Need {100 - len(self.candlestick_df)} more candlesticks")
+                            print()
+                        
+                        # Display last few candlesticks
+                        if not self.candlestick_df.empty:
+                            print(f"{Fore.BLUE}Recent Candlesticks:{Style.RESET_ALL}")
+                            print(f"{'-'*30}")
+                            recent = self.candlestick_df.iloc[-15:] if len(self.candlestick_df) > 15 else self.candlestick_df
+                            for _, candle in recent.iterrows():
+                                time_str = datetime.fromtimestamp(candle['timestamp']).strftime('%H:%M:%S')
+                                color = Fore.GREEN if candle['close'] >= candle['open'] else Fore.RED
+                                print(f"{color}{time_str} | O: {candle['open']:.3f} | H: {candle['high']:.3f} | "
+                                      f"L: {candle['low']:.3f} | C: {candle['close']:.3f}{Style.RESET_ALL}")
+    
         except Exception as e:
-            logger.error(f"Error in market data update: {str(e)}")
+            logger.error(f"Error updating display: {str(e)}")
+            logger.exception("Full traceback:")
 
     def execute_trade(self, signal):
         """Execute trading signal."""
@@ -338,14 +392,22 @@ class TradingBot:
         logger.info("Received exit signal. Closing positions and shutting down...")
         self.running = False
         try:
-            # Close any open positions
-            self.client.close_position(self.symbol)
-            logger.info("Positions closed")
+            # Try to close any open positions without checking first
+            try:
+                self.client.close_position(self.symbol)
+                logger.info("Position closed successfully")
+            except Exception as e:
+                if "Position does not exist" in str(e):
+                    logger.info("No open position to close")
+                else:
+                    raise
+                
         except Exception as e:
             logger.error(f"Error closing positions: {str(e)}")
+            logger.exception("Full traceback:")
         
         # Close WebSocket connection
-        if self.client.ws_client:
+        if hasattr(self.client, 'ws_client') and self.client.ws_client:
             self.client.ws_client.close()
             logger.info("WebSocket connection closed")
 
@@ -366,25 +428,87 @@ class TradingBot:
                     self.on_candlestick_update(message)
             
             # Connect to WebSocket
+            print("\nConnecting to KuCoin WebSocket...")
             ws_thread = self.client.connect_websocket(
                 symbol=self.symbol,
                 callback=handle_candlestick_update
             )
             
-            print("\nWaiting for market data...")
+            print("Connected! Waiting for market data...")
+            print("Press Ctrl+C to exit safely\n")
             
             # Keep the main thread alive
             while self.running:
                 time.sleep(1)
                 
+                # Check WebSocket connection
+                if not ws_thread.is_alive():
+                    print("WebSocket disconnected. Reconnecting...")
+                    ws_thread = self.client.connect_websocket(
+                        symbol=self.symbol,
+                        callback=handle_candlestick_update
+                    )
+            
             ws_thread.join(timeout=5)
             
         except Exception as e:
             logger.error(f"Error running bot: {str(e)}")
+            logger.exception("Full traceback:")
             raise
         finally:
             if self.client.ws_client:
                 self.client.ws_client.close()
+
+    def display_market_state(self):
+        """Display current market state including indicators and recent candlesticks"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        # Current Market State
+        print("\n=== Current Market State ===")
+        print(f"Symbol: {self.symbol}")
+        print(f"Current Price: {self.last_price:.2f}")
+        print(f"24h Volume: {self.volume_24h:.2f}")
+        print(f"24h High: {self.high_24h:.2f}")
+        print(f"24h Low: {self.low_24h:.2f}")
+        
+        # Strategy Indicators
+        if len(self.candlestick_df) >= 100:  # Only show if we have enough data
+            print("\n=== Strategy Indicators ===")
+            
+            # Get indicator values
+            rsi = self.strategy.calculate_rsi(self.candlestick_df['close'].values)
+            macd, signal, hist = self.strategy.calculate_macd(self.candlestick_df['close'].values)
+            
+            # Color code RSI
+            rsi_color = '\033[32m' if rsi <= 40 else '\033[31m' if rsi >= 60 else '\033[37m'
+            print(f"RSI (40/60): {rsi_color}{rsi:.2f}\033[0m")
+            
+            # Color code MACD
+            macd_color = '\033[32m' if macd > signal else '\033[31m'
+            hist_color = '\033[32m' if hist > 0 else '\033[31m'
+            print(f"MACD: {macd_color}{macd:.4f}\033[0m")
+            print(f"Signal: {macd_color}{signal:.4f}\033[0m")
+            print(f"Histogram: {hist_color}{hist:.4f}\033[0m")
+            
+            # Log indicator values
+            self.strategy_logger.info(f"Indicators - RSI: {rsi:.2f}, MACD: {macd:.4f}, Signal: {signal:.4f}, Hist: {hist:.4f}")
+        
+        # Recent Candlesticks
+        print("\n=== Recent Candlesticks ===")
+        if self.candlestick_df.empty:
+            print("No data available for recent candlesticks")
+        else:
+            recent_candles = self.candlestick_df.iloc[-self.display_candles:].copy()
+            for _, row in recent_candles.iterrows():
+                color = '\033[32m' if row['close'] >= row['open'] else '\033[31m'
+                print(f"{color}Time: {datetime.fromtimestamp(row['timestamp']).strftime('%H:%M:%S')} | "
+                      f"O: {row['open']:.2f} | H: {row['high']:.2f} | L: {row['low']:.2f} | C: {row['close']:.2f}\033[0m")
+        
+        # Trading Status
+        print("\n=== Trading Status ===")
+        print(f"Last Signal: {self.strategy.last_signal if hasattr(self.strategy, 'last_signal') else 'None'}")
+        if hasattr(self.strategy, 'last_signal_time') and self.strategy.last_signal_time:
+            print(f"Last Signal Time: {datetime.fromtimestamp(self.strategy.last_signal_time).strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == "__main__":
     bot = TradingBot()

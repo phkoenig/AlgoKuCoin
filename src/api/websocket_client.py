@@ -136,13 +136,25 @@ class WebSocketClient:
         """Handle incoming WebSocket messages."""
         try:
             data = json.loads(message)
-            self.ws_logger.debug(f"Raw message: {message}")  # Debug log for WebSocket messages
+            
+            # Log message type and topic for debugging
+            if 'type' in data:
+                msg_type = data['type']
+                if msg_type == 'message':
+                    topic = data.get('topic', '')
+                    self.ws_logger.debug(f"Received {msg_type} for topic: {topic}")
+                    self.ws_logger.debug(f"Data: {data.get('data', {})}")
+                elif msg_type == 'welcome':
+                    self.ws_logger.info("Received welcome message")
+                elif msg_type == 'pong':
+                    self.ws_logger.debug("Received pong message")
             
             if self.callback:
                 self.callback(data)
             
         except Exception as e:
             self.logger.error(f"Error processing message: {str(e)}")
+            self.logger.exception("Full traceback:")
 
     def on_error(self, ws, error):
         """Handle WebSocket errors."""
@@ -153,7 +165,7 @@ class WebSocketClient:
         self.running = False
         self.logger.info("WebSocket connection closed")
 
-    def connect(self, symbol, callback=None):
+    def connect(self, symbol, callback=None, topics=None):
         """Connect to KuCoin WebSocket and subscribe to market data."""
         self.callback = callback
         self.running = True
@@ -183,8 +195,19 @@ class WebSocketClient:
                     if self.running:
                         self.logger.warning("WebSocket disconnected. Reconnecting...")
                         time.sleep(5)
+                        # Get new token and endpoint
+                        token, endpoint = self.get_ws_token()
+                        ws_url = f"{endpoint}?token={token}&connectId={int(time.time() * 1000)}"
+                        self.ws = websocket.WebSocketApp(
+                            ws_url,
+                            on_message=self.on_message,
+                            on_error=self.on_error,
+                            on_close=self.on_close,
+                            on_open=self.on_open
+                        )
                 except Exception as e:
                     self.logger.error(f"WebSocket error: {str(e)}")
+                    self.logger.exception("Full traceback:")
                     if self.running:
                         time.sleep(5)
         
@@ -196,14 +219,15 @@ class WebSocketClient:
         # Wait for connection to establish
         time.sleep(1)
         
-        # Subscribe to market data topics
-        topics = [
-            f"/contractMarket/execution:{symbol}",
-            f"/contractMarket/tickerV2:{symbol}",
-            f"/contract/instrument:{symbol}"
-        ]
+        # Use provided topics or default ones
+        if topics is None:
+            topics = [
+                f"/contractMarket/execution:{symbol}",
+                f"/contractMarket/tickerV2:{symbol}",
+                f"/contract/instrument:{symbol}"
+            ]
         
-        # Send subscription messages
+        # Subscribe to market data topics
         for topic in topics:
             subscribe_message = {
                 "id": int(time.time() * 1000),
@@ -213,7 +237,7 @@ class WebSocketClient:
                 "response": True
             }
             self.ws.send(json.dumps(subscribe_message))
-            self.ws_logger.debug(f"Subscribed to: {topic}")
+            self.ws_logger.info(f"Subscribed to: {topic}")
         
         return ws_thread
 

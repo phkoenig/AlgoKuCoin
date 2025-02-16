@@ -1,102 +1,103 @@
 import numpy as np
 import pandas as pd
+import logging
 from typing import List, Dict
 from datetime import datetime
+import time
 
 class RsiMacdStrategy:
-    def __init__(self, rsi_period: int = 14, 
-                 macd_fast: int = 12, 
-                 macd_slow: int = 26, 
-                 macd_signal: int = 9,
-                 rsi_lower: float = 40,
-                 rsi_upper: float = 60,
-                 signal_buffer_seconds: int = 3):
-        """
-        Initialize the RSI + MACD strategy.
-        
-        Args:
-            rsi_period: Period for RSI calculation
-            macd_fast: Fast period for MACD
-            macd_slow: Slow period for MACD
-            macd_signal: Signal period for MACD
-            rsi_lower: Lower RSI threshold (oversold)
-            rsi_upper: Upper RSI threshold (overbought)
-            signal_buffer_seconds: Time window to look for matching signals
-        """
-        self.rsi_period = rsi_period
-        self.macd_fast = macd_fast
-        self.macd_slow = macd_slow
-        self.macd_signal = macd_signal
+    def __init__(self, rsi_lower=40, rsi_upper=60, signal_buffer_seconds=3):
         self.rsi_lower = rsi_lower
         self.rsi_upper = rsi_upper
         self.signal_buffer_seconds = signal_buffer_seconds
-        
-        # Signal tracking
-        self.last_rsi_signal = {'type': None, 'time': None}
-        self.last_macd_signal = {'type': None, 'time': None}
+        self.last_signal = None
+        self.last_signal_time = None
+        self.logger = logging.getLogger('strategy')
 
-    def calculate_rsi(self, closes: List[float]) -> float:
-        """Calculate RSI value."""
-        if len(closes) < self.rsi_period:
-            return 50  # Default value when not enough data
-            
+    def calculate_rsi(self, closes):
+        """Calculate RSI using pandas for better accuracy"""
+        # Convert to pandas Series if not already
+        closes = pd.Series(closes) if not isinstance(closes, pd.Series) else closes
+        
         # Calculate price changes
-        delta = np.diff(closes)
+        delta = closes.diff()
         
         # Separate gains and losses
-        gains = np.where(delta > 0, delta, 0)
-        losses = np.where(delta < 0, -delta, 0)
+        gains = delta.where(delta > 0, 0)
+        losses = -delta.where(delta < 0, 0)
         
-        # Calculate average gains and losses
-        avg_gain = np.mean(gains[:self.rsi_period])
-        avg_loss = np.mean(losses[:self.rsi_period])
+        # Calculate EMAs for gains and losses
+        avg_gains = gains.ewm(alpha=1/14, min_periods=14).mean()
+        avg_losses = losses.ewm(alpha=1/14, min_periods=14).mean()
         
-        if avg_loss == 0:
-            return 100
-        
-        rs = avg_gain / avg_loss
+        # Calculate RS and RSI
+        rs = avg_gains / avg_losses
         rsi = 100 - (100 / (1 + rs))
         
-        return rsi
+        # Log the calculation
+        self.logger.debug(f"Calculated RSI: {rsi.iloc[-1]:.2f}")
+        
+        return rsi.iloc[-1]
 
-    def calculate_macd(self, closes: List[float]) -> tuple:
-        """Calculate MACD values."""
-        if len(closes) < self.macd_slow + self.macd_signal:
-            return 0, 0, 0  # Default values when not enough data
-            
+    def calculate_macd(self, closes):
+        """Calculate MACD using pandas for better accuracy"""
+        # Convert to pandas Series if not already
+        closes = pd.Series(closes) if not isinstance(closes, pd.Series) else closes
+        
         # Calculate EMAs
-        exp1 = pd.Series(closes).ewm(span=self.macd_fast, adjust=False).mean()
-        exp2 = pd.Series(closes).ewm(span=self.macd_slow, adjust=False).mean()
+        ema12 = closes.ewm(span=12, adjust=False).mean()
+        ema26 = closes.ewm(span=26, adjust=False).mean()
         
         # Calculate MACD line
-        macd = exp1 - exp2
+        macd = ema12 - ema26
         
-        # Calculate Signal line
-        signal = macd.ewm(span=self.macd_signal, adjust=False).mean()
+        # Calculate signal line
+        signal = macd.ewm(span=9, adjust=False).mean()
         
         # Calculate histogram
-        hist = macd - signal
+        histogram = macd - signal
         
-        return macd.iloc[-1], signal.iloc[-1], hist.iloc[-1]
+        # Log the calculations
+        self.logger.debug(
+            f"Calculated MACD - Line: {macd.iloc[-1]:.4f}, "
+            f"Signal: {signal.iloc[-1]:.4f}, "
+            f"Histogram: {histogram.iloc[-1]:.4f}"
+        )
+        
+        return macd.iloc[-1], signal.iloc[-1], histogram.iloc[-1]
 
-    def check_signals_match(self, signal_type: str, current_time: int) -> bool:
-        """
-        Check if RSI and MACD signals match within the buffer window.
-        Returns True if signals match within the buffer time window.
-        """
-        if self.last_rsi_signal['type'] != signal_type or self.last_macd_signal['type'] != signal_type:
-            return False
+    def check_signal(self, candlestick_df):
+        """Check for trading signals based on RSI and MACD"""
+        if len(candlestick_df) < 100:  # Need at least 100 candles for reliable signals
+            return None
             
-        # Convert millisecond timestamps to seconds
-        rsi_time = self.last_rsi_signal['time'] // 1000
-        macd_time = self.last_macd_signal['time'] // 1000
-        current_time = current_time // 1000
+        # Calculate indicators
+        rsi = self.calculate_rsi(candlestick_df['close'])
+        macd, signal, histogram = self.calculate_macd(candlestick_df['close'])
         
-        # Check if both signals occurred within buffer window
-        latest_signal = max(rsi_time, macd_time)
-        earliest_signal = min(rsi_time, macd_time)
+        # Get current time
+        current_time = time.time()
         
-        return (latest_signal - earliest_signal) <= self.signal_buffer_seconds
+        # Check if enough time has passed since last signal
+        if (self.last_signal_time and 
+            current_time - self.last_signal_time < self.signal_buffer_seconds):
+            return None
+            
+        # Check for buy signal
+        if rsi <= self.rsi_lower and macd > signal:
+            self.last_signal = "BUY"
+            self.last_signal_time = current_time
+            self.logger.info(f"BUY Signal - RSI: {rsi:.2f}, MACD: {macd:.4f}, Signal: {signal:.4f}")
+            return "BUY"
+            
+        # Check for sell signal
+        elif rsi >= self.rsi_upper and macd < signal:
+            self.last_signal = "SELL"
+            self.last_signal_time = current_time
+            self.logger.info(f"SELL Signal - RSI: {rsi:.2f}, MACD: {macd:.4f}, Signal: {signal:.4f}")
+            return "SELL"
+            
+        return None
 
     def analyze_candles(self, candles: List[Dict]) -> str:
         """
@@ -105,7 +106,7 @@ class RsiMacdStrategy:
         Returns:
             str: 'buy', 'sell', or None
         """
-        if len(candles) < max(self.rsi_period, self.macd_slow + self.macd_signal):
+        if len(candles) < 100:
             return None
             
         closes = [float(candle['close']) for candle in candles]
@@ -114,33 +115,29 @@ class RsiMacdStrategy:
         # Calculate indicators
         rsi = self.calculate_rsi(closes)
         macd, signal, hist = self.calculate_macd(closes)
-        prev_hist = self.get_previous_hist(candles)
+        
+        # Log indicator values
+        self.logger.info(f"RSI: {rsi:.2f}, MACD: {macd:.3f}, Signal: {signal:.3f}, Hist: {hist:.3f}")
         
         # Check RSI conditions
         if rsi < self.rsi_lower:
-            self.last_rsi_signal = {'type': 'buy', 'time': current_time}
+            self.last_signal = 'buy'
+            self.logger.info(f"RSI Buy Signal: {rsi:.2f} < {self.rsi_lower}")
         elif rsi > self.rsi_upper:
-            self.last_rsi_signal = {'type': 'sell', 'time': current_time}
+            self.last_signal = 'sell'
+            self.logger.info(f"RSI Sell Signal: {rsi:.2f} > {self.rsi_upper}")
             
         # Check MACD conditions
-        if hist > 0 and prev_hist <= 0:  # Bullish crossover
-            self.last_macd_signal = {'type': 'buy', 'time': current_time}
-        elif hist < 0 and prev_hist >= 0:  # Bearish crossover
-            self.last_macd_signal = {'type': 'sell', 'time': current_time}
+        if hist > 0 and self.calculate_rsi(closes[:-1]) <= self.rsi_lower:  # Bullish crossover
+            self.last_signal = 'buy'
+            self.logger.info(f"MACD Buy Signal: Crossover from {self.calculate_rsi(closes[:-1]):.3f} to {rsi:.3f}")
+        elif hist < 0 and self.calculate_rsi(closes[:-1]) >= self.rsi_upper:  # Bearish crossover
+            self.last_signal = 'sell'
+            self.logger.info(f"MACD Sell Signal: Crossover from {self.calculate_rsi(closes[:-1]):.3f} to {rsi:.3f}")
             
-        # Check if signals match within buffer window
-        if self.check_signals_match('buy', current_time):
-            return 'buy'
-        elif self.check_signals_match('sell', current_time):
-            return 'sell'
+        # Check if enough time has passed since last signal
+        if (self.last_signal_time and 
+            current_time - self.last_signal_time < self.signal_buffer_seconds):
+            return None
             
-        return None
-
-    def get_previous_hist(self, candles: List[Dict]) -> float:
-        """Calculate previous MACD histogram value."""
-        if len(candles) < max(self.rsi_period, self.macd_slow + self.macd_signal) + 1:
-            return 0
-            
-        closes = [float(candle['close']) for candle in candles[:-1]]
-        _, _, hist = self.calculate_macd(closes)
-        return hist 
+        return self.last_signal 
