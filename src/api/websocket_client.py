@@ -20,6 +20,10 @@ class WebSocketClient:
         self.running = False
         self.callback = None
         
+        # Get loggers
+        self.ws_logger = logging.getLogger('websocket')
+        self.logger = logging.getLogger()
+        
         # Candlestick aggregation
         self.current_candle = None
         self.candles = []
@@ -126,28 +130,28 @@ class WebSocketClient:
 
     def on_open(self, ws):
         """Handle WebSocket connection opened."""
-        logging.warning("WebSocket connection established")
+        self.logger.info("WebSocket connection established")
 
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages."""
         try:
             data = json.loads(message)
-            logging.warning(f"Raw message: {message}")  # Debug log
+            self.ws_logger.debug(f"Raw message: {message}")  # Debug log for WebSocket messages
             
             if self.callback:
                 self.callback(data)
             
         except Exception as e:
-            logging.error(f"Error processing message: {str(e)}")
+            self.logger.error(f"Error processing message: {str(e)}")
 
     def on_error(self, ws, error):
         """Handle WebSocket errors."""
-        logging.error(f"WebSocket error: {str(error)}")
+        self.logger.error(f"WebSocket error: {str(error)}")
 
     def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket connection close."""
+        """Handle WebSocket connection closed."""
         self.running = False
-        logging.info("WebSocket connection closed")
+        self.logger.info("WebSocket connection closed")
 
     def connect(self, symbol, callback=None):
         """Connect to KuCoin WebSocket and subscribe to market data."""
@@ -177,10 +181,10 @@ class WebSocketClient:
                 try:
                     self.ws.run_forever()
                     if self.running:
-                        logging.warning("WebSocket disconnected. Reconnecting...")
+                        self.logger.warning("WebSocket disconnected. Reconnecting...")
                         time.sleep(5)
                 except Exception as e:
-                    logging.error(f"WebSocket error: {str(e)}")
+                    self.logger.error(f"WebSocket error: {str(e)}")
                     if self.running:
                         time.sleep(5)
         
@@ -209,7 +213,7 @@ class WebSocketClient:
                 "response": True
             }
             self.ws.send(json.dumps(subscribe_message))
-            logging.warning(f"Subscribed to: {topic}")
+            self.ws_logger.debug(f"Subscribed to: {topic}")
         
         return ws_thread
 

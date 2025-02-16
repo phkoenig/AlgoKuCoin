@@ -8,20 +8,56 @@ import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+import colorama
+from colorama import Fore, Style
 
-# Disable noisy websocket and urllib3 logging
-logging.getLogger('websocket').setLevel(logging.ERROR)
-logging.getLogger('urllib3').setLevel(logging.ERROR)
+# Initialize colorama
+colorama.init()
 
-# Set logging level for our bot
-logging.basicConfig(
-    level=logging.WARNING,  # Changed from INFO to WARNING
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# Create logs directory if it doesn't exist
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
+# Configure logging
+def setup_logging():
+    # Main logger
+    main_logger = logging.getLogger()
+    main_logger.setLevel(logging.DEBUG)
+
+    # Console handler (INFO and above)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+
+    # WebSocket file handler (DEBUG and above)
+    ws_handler = RotatingFileHandler('logs/websocket.log', maxBytes=1024*1024, backupCount=5)
+    ws_handler.setLevel(logging.DEBUG)
+    ws_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    ws_handler.setFormatter(ws_formatter)
+
+    # Trading file handler (INFO and above)
+    trading_handler = RotatingFileHandler('logs/trading.log', maxBytes=1024*1024, backupCount=5)
+    trading_handler.setLevel(logging.INFO)
+    trading_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    trading_handler.setFormatter(trading_formatter)
+
+    # Add handlers to the main logger
+    main_logger.addHandler(console_handler)
+    main_logger.addHandler(ws_handler)
+    main_logger.addHandler(trading_handler)
+
+    # Configure WebSocket logger
+    ws_logger = logging.getLogger('websocket')
+    ws_logger.setLevel(logging.DEBUG)
+    ws_logger.addHandler(ws_handler)
+    ws_logger.propagate = False  # Prevent messages from propagating to the root logger
+
+    return main_logger
+
+# Set up logging
+logger = setup_logging()
 
 class TradingBot:
     def __init__(self):
@@ -32,6 +68,10 @@ class TradingBot:
         self.symbol = "SOLUSDTM"  # Use futures symbol directly
         self.leverage = 5
         self.size = 1  # Trading volume in SOL
+        
+        # Display settings
+        self.display_candles = 15  # Number of candles to display (increased from 5)
+        self.max_stored_candles = 100  # Maximum number of candles to store
         
         # Initialize WebSocket topics
         self.topics = [
@@ -164,12 +204,16 @@ class TradingBot:
             self.last_update_time = current_time
             
         except Exception as e:
-            logging.error(f"Error aggregating market data: {str(e)}")
+            logger.error(f"Error aggregating market data: {str(e)}")
 
-    def format_candlesticks_for_display(self, num_candles=5):
+    def format_candlesticks_for_display(self, num_candles=None):
         """Format recent candlesticks for display."""
         if self.candlestick_df.empty:
             return None
+            
+        # Use class setting if num_candles not specified
+        if num_candles is None:
+            num_candles = self.display_candles
             
         # Get last n candles
         recent_candles = self.candlestick_df.iloc[-num_candles:].copy()
@@ -190,6 +234,10 @@ class TradingBot:
         """Handle new market data and display updates."""
         try:
             if isinstance(message, dict):
+                # Log WebSocket message to separate file
+                ws_logger = logging.getLogger('websocket')
+                ws_logger.debug(f"WebSocket message: {message}")
+                
                 # Aggregate the data
                 self.aggregate_tick_data(message)
                 
@@ -200,26 +248,45 @@ class TradingBot:
                     
                     # Display market data
                     if self.last_price and self.last_update_time:
-                        current_time = datetime.fromtimestamp(self.last_update_time).strftime('%H:%M:%S.%f')[:-3]
+                        current_time = datetime.fromtimestamp(self.last_update_time).strftime('%H:%M:%S')
                         
-                        # Display current market state
-                        print(f"\n[{current_time}] Current Price: {self.last_price:.3f}")
+                        # Clear screen and move cursor to top
+                        os.system('cls' if os.name == 'nt' else 'clear')
+                        
+                        # Display header
+                        print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}")  # Widened separator
+                        print(f"{Fore.GREEN}KuCoin Futures Bot - {self.symbol}{Style.RESET_ALL}")
+                        print(f"Time: {current_time}")
+                        print(f"Storing last {self.max_stored_candles} candles, displaying last {self.display_candles}")
+                        print(f"{Fore.CYAN}{'='*80}{Style.RESET_ALL}\n")  # Widened separator
+                        
+                        # Display current market state in organized sections
+                        print(f"{Fore.BLUE}Current Market State:{Style.RESET_ALL}")
+                        print(f"{'-'*30}")
+                        print(f"Current Price: {Fore.YELLOW}{self.last_price:.3f}{Style.RESET_ALL} USDT")
                         if self.mark_price:
-                            print(f"Mark Price: {self.mark_price:.3f}")
+                            print(f"Mark Price:    {Fore.YELLOW}{self.mark_price:.3f}{Style.RESET_ALL} USDT")
                         if self.index_price:
-                            print(f"Index Price: {self.index_price:.3f}")
+                            print(f"Index Price:   {Fore.YELLOW}{self.index_price:.3f}{Style.RESET_ALL} USDT")
                         if self.funding_rate:
-                            print(f"Funding Rate: {self.funding_rate*100:.4f}%")
+                            print(f"Funding Rate:  {Fore.YELLOW}{self.funding_rate*100:.4f}%{Style.RESET_ALL}")
                         
-                        # Display recent candlesticks
-                        recent_candles = self.format_candlesticks_for_display(5)
+                        # Display recent candlesticks with more historical data
+                        recent_candles = self.format_candlesticks_for_display()
                         if recent_candles is not None:
-                            print("\nLast 5 Candlesticks:")
-                            print(recent_candles.to_string(index=False))
-                            print()
+                            print(f"\n{Fore.BLUE}Recent Candlesticks (Last {self.display_candles} seconds):{Style.RESET_ALL}")
+                            print(f"{'-'*80}")  # Widened separator
+                            print(f"{'Time':^8} | {'Open':^8} | {'High':^8} | {'Low':^8} | {'Close':^8} | {'Volume':^10} | {'Trades':^6}")
+                            print(f"{'-'*80}")  # Widened separator
+                            
+                            for _, row in recent_candles.iterrows():
+                                print(f"{row['time']:^8} | {row['open']:8.3f} | {row['high']:8.3f} | "
+                                      f"{row['low']:8.3f} | {row['close']:8.3f} | {row['volume']:10.4f} | {row['trades']:^6d}")
+                            
+                            print(f"{'-'*80}\n")  # Widened separator
                     
         except Exception as e:
-            logging.error(f"Error in market data update: {str(e)}")
+            logger.error(f"Error in market data update: {str(e)}")
 
     def execute_trade(self, signal):
         """Execute trading signal."""
@@ -227,16 +294,16 @@ class TradingBot:
             # Get current position
             position = self.client.get_position(self.symbol)
             current_size = float(position.get('currentQty', 0))
-            logging.info(f"Current position size: {current_size}")
+            logger.info(f"Current position size: {current_size}")
             
             # Set leverage
             self.client.set_leverage(self.symbol, self.leverage)
-            logging.info(f"Leverage set to {self.leverage}x")
+            logger.info(f"Leverage set to {self.leverage}x")
             
             if signal == 'buy' and current_size <= 0:
                 # Close any existing short position
                 if current_size < 0:
-                    logging.info(f"Closing existing short position: {current_size}")
+                    logger.info(f"Closing existing short position: {current_size}")
                     self.client.close_position(self.symbol)
                 
                 # Open long position
@@ -246,12 +313,12 @@ class TradingBot:
                     leverage=self.leverage,
                     size=self.size
                 )
-                logging.info(f"Opened long position: {order}")
+                logger.info(f"Opened long position: {order}")
                 
             elif signal == 'sell' and current_size >= 0:
                 # Close any existing long position
                 if current_size > 0:
-                    logging.info(f"Closing existing long position: {current_size}")
+                    logger.info(f"Closing existing long position: {current_size}")
                     self.client.close_position(self.symbol)
                 
                 # Open short position
@@ -261,26 +328,26 @@ class TradingBot:
                     leverage=self.leverage,
                     size=self.size
                 )
-                logging.info(f"Opened short position: {order}")
+                logger.info(f"Opened short position: {order}")
                 
         except Exception as e:
-            logging.error(f"Error executing trade: {str(e)}")
+            logger.error(f"Error executing trade: {str(e)}")
 
     def handle_exit(self, signum, frame):
         """Handle graceful shutdown."""
-        logging.info("Received exit signal. Closing positions and shutting down...")
+        logger.info("Received exit signal. Closing positions and shutting down...")
         self.running = False
         try:
             # Close any open positions
             self.client.close_position(self.symbol)
-            logging.info("Positions closed")
+            logger.info("Positions closed")
         except Exception as e:
-            logging.error(f"Error closing positions: {str(e)}")
+            logger.error(f"Error closing positions: {str(e)}")
         
         # Close WebSocket connection
         if self.client.ws_client:
             self.client.ws_client.close()
-            logging.info("WebSocket connection closed")
+            logger.info("WebSocket connection closed")
 
     def run(self):
         """Run the trading bot."""
@@ -313,7 +380,7 @@ class TradingBot:
             ws_thread.join(timeout=5)
             
         except Exception as e:
-            logging.error(f"Error running bot: {str(e)}")
+            logger.error(f"Error running bot: {str(e)}")
             raise
         finally:
             if self.client.ws_client:
