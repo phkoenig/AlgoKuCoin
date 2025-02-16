@@ -1,0 +1,6 @@
+kucoin-futures-python==1.0.7
+kucoin-python==1.0.15
+numpy==1.24.3
+pandas==2.0.2
+python-dotenv==1.0.0
+websocket-client==1.6.1 

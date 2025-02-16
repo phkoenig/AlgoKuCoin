@@ -1,0 +1,55 @@
+name: kucoin-bot
+channels:
+  - defaults
+dependencies:
+  - blas=1.0=mkl
+  - bottleneck=1.4.2=py311h57dcf0c_0
+  - bzip2=1.0.8=h2bbff1b_6
+  - ca-certificates=2024.12.31=haa95532_0
+  - click=8.1.7=py311haa95532_0
+  - colorama=0.4.6=py311haa95532_0
+  - intel-openmp=2023.1.0=h59b6b97_46320
+  - libffi=3.4.4=hd77b12b_1
+  - mkl=2023.1.0=h6b88ed4_46358
+  - mkl-service=2.4.0=py311h827c3e9_2
+  - mkl_fft=1.3.11=py311h827c3e9_0
+  - mkl_random=1.2.8=py311hea22821_0
+  - numexpr=2.10.1=py311h4cd664f_0
+  - numpy=2.2.2=py311hdab7c0b_0
+  - numpy-base=2.2.2=py311hd01c5d8_0
+  - openssl=3.0.15=h827c3e9_0
+  - pandas=2.2.3=py311h5da7b33_0
+  - pip=25.0=py311haa95532_0
+  - python=3.11.11=h4607a30_0
+  - python-dateutil=2.9.0post0=py311haa95532_2
+  - python-dotenv=0.21.0=py311haa95532_0
+  - python-tzdata=2023.3=pyhd3eb1b0_0
+  - pytz=2024.1=py311haa95532_0
+  - setuptools=72.1.0=py311haa95532_0
+  - six=1.16.0=pyhd3eb1b0_1
+  - sqlite=3.45.3=h2bbff1b_0
+  - tbb=2021.8.0=h59b6b97_0
+  - tk=8.6.14=h0416ee5_0
+  - tzdata=2025a=h04d1e81_0
+  - vc=14.42=haa95532_4
+  - vs2015_runtime=14.42.34433=he0abc0d_4
+  - wheel=0.45.1=py311haa95532_0
+  - xz=5.6.4=h4754444_1
+  - zlib=1.2.13=h8cc25b3_1
+  - pip:
+      - aiohappyeyeballs==2.4.6
+      - aiohttp==3.11.12
+      - aiosignal==1.3.2
+      - attrs==25.1.0
+      - certifi==2025.1.31
+      - charset-normalizer==3.4.1
+      - frozenlist==1.5.0
+      - idna==3.10
+      - multidict==6.1.0
+      - propcache==0.2.1
+      - python-kucoin==2.2.0
+      - requests==2.32.3
+      - urllib3==2.3.0
+      - websockets==15.0
+      - yarl==1.18.3
+prefix: C:\Users\Phkoe\anaconda3\envs\kucoin-bot
